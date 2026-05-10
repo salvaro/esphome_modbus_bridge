@@ -254,6 +254,7 @@ namespace esphome
       void rs485_begin_tx_();
       void rs485_end_tx_();
       void rs485_set_tx_(bool en);
+      void send_tcp_exception_(const PendingRequest &req, uint8_t exception_code);
     };
 
   } // namespace modbus_bridge
