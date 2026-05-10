@@ -1510,20 +1510,36 @@ namespace esphome
 
       size_t current_size = pending.response.size();
 
-      if (current_size == 0)
+      // if (current_size == 0)
+      // {
+      //   uint32_t dt = millis() - pending.start_time;
+      //   if (dt > this->rtu_response_timeout_ms_)
+      //   {
+      //     g_timeouts++;
+      //     ESP_LOGW(TAG, "Modbus timeout: no response received (no first byte) client_id=%d", pending.client_fd);
+      //     this->fire_rtu_timeout_for_request_(pending);
+      //     this->finish_current_and_send_next_();
+      //     return;
+      //   }
+      //   return; // still within overall timeout
+      // }
+
+      if (current_size == 0) 
       {
         uint32_t dt = millis() - pending.start_time;
-        if (dt > this->rtu_response_timeout_ms_)
+        if (dt > this->rtu_response_timeout_ms_) 
         {
           g_timeouts++;
           ESP_LOGW(TAG, "Modbus timeout: no response received (no first byte) client_id=%d", pending.client_fd);
+          // Send Modbus exception 0x0B to TCP client
+          this->send_tcp_exception_(pending, 0x0B);
           this->fire_rtu_timeout_for_request_(pending);
           this->finish_current_and_send_next_();
           return;
         }
-        return; // still within overall timeout
+        return;
       }
-
+      
       // --- End-of-frame detection by size stability over consecutive polls ---
       // Consider the RTU response complete once we have observed no growth in
       // `pending.response.size()` for two consecutive polling intervals.
@@ -1581,21 +1597,37 @@ namespace esphome
         return;
       }
 
-      if (millis() - pending.start_time > this->rtu_response_timeout_ms_)
+      // if (millis() - pending.start_time > this->rtu_response_timeout_ms_)
+      // {
+      //   g_timeouts++;
+      //   if (!pending.response.empty())
+      //   {
+      //     ESP_LOGW(TAG, "Incomplete RTU response (%d bytes): %s",
+      //              (int)pending.response.size(), to_hex(pending.response).c_str());
+      //   }
+      //   ESP_LOGW(TAG, "Modbus timeout: response incomplete. Dropping. client_id=%d", pending.client_fd);
+      //   INC(g_drops_rtu_incomplete);
+      //   this->fire_rtu_timeout_for_request_(pending);
+      //   this->finish_current_and_send_next_();
+      //   return;
+      // }
+
+      if (millis() - pending.start_time > this->rtu_response_timeout_ms_) 
       {
         g_timeouts++;
-        if (!pending.response.empty())
-        {
+        if (!pending.response.empty()) {
           ESP_LOGW(TAG, "Incomplete RTU response (%d bytes): %s",
                    (int)pending.response.size(), to_hex(pending.response).c_str());
         }
         ESP_LOGW(TAG, "Modbus timeout: response incomplete. Dropping. client_id=%d", pending.client_fd);
         INC(g_drops_rtu_incomplete);
+        // Send Modbus exception 0x0B to TCP client
+        this->send_tcp_exception_(pending, 0x0B);
         this->fire_rtu_timeout_for_request_(pending);
         this->finish_current_and_send_next_();
         return;
       }
-
+      
       return;
     }
 
@@ -1710,6 +1742,43 @@ namespace esphome
       return this->enabled_;
     }
 
+    void ModbusBridgeComponent::send_tcp_exception_(const PendingRequest &req, uint8_t exception_code)
+    {
+      // Build Modbus TCP exception frame (9 bytes total)
+      // Format: TID(2) + PID(2) + Len(2) + UID(1) + FC(1) + ExceptionCode(1)
+      std::vector<uint8_t> response;
+      response.reserve(9);
+      
+      // Transaction ID (from original request header)
+      response.push_back(req.header[0]);
+      response.push_back(req.header[1]);
+      
+      // Protocol ID (must be 0)
+      response.push_back(req.header[2]);
+      response.push_back(req.header[3]);
+      
+      // Length (fixed to 3: UID + FC + ExceptionCode)
+      response.push_back(0x00);
+      response.push_back(0x03);
+      
+      // Unit ID (from request)
+      response.push_back(req.header[6]);
+      
+      // Function code with error bit set (original FC | 0x80)
+      uint8_t original_fc = req.rtu_data.size() > 1 ? req.rtu_data[1] : 0x01;
+      response.push_back(original_fc | 0x80);
+      
+      // Exception code (0x0B = Gateway Target Device Failed to Respond)
+      response.push_back(exception_code);
+      
+      // Send to the TCP client
+      this->send_to_client_(req.client_fd, response.data(), response.size());
+      
+      if (this->debug_) {
+        ESP_LOGD(TAG, "Sent Modbus exception 0x%02X for FC 0x%02X to client %d",
+                 exception_code, original_fc, req.client_fd);
+      }
+    }
     // --- Runtime stats getters (node-wide aggregated counters) -------------------
 
     uint32_t ModbusBridgeComponent::get_frames_in() const { return g_frames_in; }
